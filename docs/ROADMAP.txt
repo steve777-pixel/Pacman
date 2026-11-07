@@ -1,0 +1,764 @@
+=====================================================================
+ SELF-MADE PACMAN PROJECT 1.0 - DEVELOPMENT ROADMAP
+=====================================================================
+
+Put this file in docs/ROADMAP.txt (or the project root).
+Work through the stages IN ORDER. Do not start a stage until the
+"DONE WHEN" checklist of the previous stage passes.
+
+---------------------------------------------------------------------
+ PART A - COMMANDS TO RUN AFTER EDITING FILES
+---------------------------------------------------------------------
+
+Run all commands from the project root (the folder with CMakeLists.txt).
+Your VCPKG_ROOT variable must be set (check with: echo $VCPKG_ROOT).
+
+A1. THE NORMAL LOOP (use this 95% of the time)
+    After editing any .h or .cpp file:
+
+        cmake --build build
+        ctest --test-dir build --output-on-failure
+
+    - Because CMakeLists.txt uses file(GLOB_RECURSE ... CONFIGURE_DEPENDS),
+      new .cpp files under src/ are picked up automatically on the next
+      "cmake --build build". No manual re-configure is needed.
+    - Run the game afterwards when the stage says so:
+
+        ./build/pacman
+
+A2. WHEN YOU ADD A NEW TEST FILE
+    1. Create tests/test_xxx.cpp
+    2. Add its name to the add_executable(pacman_tests ...) list in
+       tests/CMakeLists.txt
+    3. Re-configure and build:
+
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+        cmake --build build
+        ctest --test-dir build --output-on-failure
+
+A3. WHEN YOU EDIT ANY CMakeLists.txt OR vcpkg.json
+    Re-configure, then build and test (same three commands as A2).
+
+A4. RUN ONLY SOME TESTS (while debugging one class)
+
+        ctest --test-dir build -R Maze --output-on-failure
+        ./build/tests/pacman_tests --gtest_filter=Maze.*
+        ./build/tests/pacman_tests --gtest_filter=GhostAI.Pinky*
+        ./build/tests/pacman_tests --gtest_list_tests
+
+    -R takes a regex matched against the test name. --gtest_filter
+    takes Suite.TestName patterns with * wildcards.
+
+A5. SEE MORE DETAIL
+        ctest --test-dir build --verbose
+        cmake --build build --verbose
+
+A6. WHEN THE BUILD BEHAVES STRANGELY (stale cache, weird linker errors)
+    Clean rebuild (keeps the vcpkg package cache, so it is fast):
+
+        rm -rf build
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+        cmake --build build
+        ctest --test-dir build --output-on-failure
+
+A7. BUILD TYPES
+    Debug (default for development, needed for the VS Code debugger):
+
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+
+    Release (for final play-testing and speed):
+
+        cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+        cmake --build build-release
+
+A8. UPDATE vcpkg BASELINE (only when you deliberately want newer packages)
+
+        git -C $VCPKG_ROOT pull
+        vcpkg x-update-baseline
+
+A9. GIT HABIT (end of every stage)
+
+        git add -A
+        git commit -m "Stage N: short description"
+
+A10. GOLDEN RULE
+    A stage is only finished when:
+      - cmake --build build        finishes with no errors and no warnings
+      - ctest --test-dir build     shows 100% tests passed
+
+
+---------------------------------------------------------------------
+ PART B - GLOBAL DESIGN RULES (apply to every stage)
+---------------------------------------------------------------------
+
+R1. SEPARATE LOGIC FROM DRAWING.
+    Files in core/, world/, entities/, systems/ must NOT include any
+    <SFML/...> header. Use your own Vec2i, Vec2f and Direction.
+    Only graphics/, audio/, states/ and ui/ may use SFML.
+    (This is what makes unit testing possible.)
+
+R2. HEADERS.
+    Every header starts with #pragma once. Include with the folder
+    name:  #include "core/Types.h".  Prefer forward declarations in
+    headers and put #include lines in the .cpp when possible.
+
+R3. CONSTANTS.
+    No magic numbers in code. Every speed, size, score, and timer
+    lives in core/Constants.h as constexpr.
+
+R4. OWNERSHIP.
+    Use std::unique_ptr for owned polymorphic objects (ghosts,
+    states). Use references for "I use this but do not own it".
+    Never use raw new/delete. Never use global mutable variables.
+
+R5. CONST-CORRECTNESS.
+    Every method that does not change the object is marked const.
+    Pass big objects by const reference.
+
+R6. DETERMINISM.
+    Game logic takes "float dt" as a parameter and never reads the
+    clock directly. Tests then use fixed dt (e.g. 1.0f / 60.0f) and
+    get the same result every run.
+
+R7. TEST NAMES.
+    TEST(SuiteName, BehaviorBeingChecked), for example:
+    TEST(Maze, WallBlocksMovement). One behavior per test.
+
+R8. ONE STAGE = ONE GIT COMMIT (at least).
+
+
+---------------------------------------------------------------------
+ PART C - THE STAGES
+---------------------------------------------------------------------
+
+Reference numbers used below (classic Pac-Man): maze is 28 columns by
+31 rows of tiles; 240 small pellets + 4 power pellets = 244 total.
+
+
+=====================================================================
+ STAGE 0 - BUILD SYSTEM                                    [DONE]
+=====================================================================
+Goal: project builds, tests run, a window opens.
+
+Files:  CMakeLists.txt, tests/CMakeLists.txt, vcpkg.json,
+        src/main.cpp, tests/test_maze.cpp (sanity test)
+
+DONE WHEN:
+  [x] cmake --build build succeeds
+  [x] ctest passes the sanity test
+  [x] ./build/pacman opens and closes a window
+
+
+=====================================================================
+ STAGE 1 - CORE TYPES AND CONSTANTS
+=====================================================================
+Goal: the vocabulary every other file uses.
+
+Files to write:
+  include/core/Types.h        (+ src/core/Types.cpp if needed)
+  include/core/Constants.h    (+ src/core/Constants.cpp can stay empty)
+  tests/test_types.cpp        (NEW: remember rule A2)
+
+Requirements:
+  Types.h
+   - enum class Direction { None, Up, Down, Left, Right };
+   - struct Vec2i { int x; int y; }  with operator+, operator-,
+     operator==, operator!=, operator* (scalar)
+   - struct Vec2f { float x; float y; } with the same operators
+   - Direction helpers (free functions or inline):
+       Vec2i toVec(Direction d);        // Up -> (0,-1), Left -> (-1,0) ...
+       Direction opposite(Direction d); // Up <-> Down, Left <-> Right
+   - enum class TileType { Empty, Wall, Pellet, PowerPellet, GhostDoor,
+                           Tunnel }   (or put it in world/Tile.h)
+   - enum class GhostMode { Scatter, Chase, Frightened, Eaten, InHouse }
+  Constants.h (all constexpr, inside namespace Config or similar)
+   - TILE_SIZE (pixels per tile, e.g. 8 for logic; scale in renderer)
+   - MAZE_WIDTH = 28, MAZE_HEIGHT = 31
+   - speeds as a fraction of a MAX_SPEED (Pac-Man 0.80, ghost 0.75,
+     frightened ghost 0.50, tunnel ghost 0.40 for level 1)
+   - scores: PELLET 10, POWER_PELLET 50, GHOST 200 (doubles per ghost
+     eaten in one power-up: 200, 400, 800, 1600), EXTRA_LIFE_AT 10000
+   - timers: FRIGHTENED_TIME 6.0f (level 1), scatter/chase schedule
+     (7, 20, 7, 20, 5, 20, 5, then chase forever)
+   - STARTING_LIVES 3
+
+OOP properties practiced:
+   - Strong typing (enum class instead of ints)
+   - Value types with operator overloading
+   - Encapsulation of configuration in one place
+
+Tests (test_types.cpp):
+   - Vec2i addition, subtraction, equality
+   - opposite(Up) == Down, and for all four directions
+   - toVec(Left) == Vec2i{-1, 0}
+
+DONE WHEN:
+  [ ] ctest passes all test_types tests
+  [ ] No other file defines its own point/direction type
+
+
+=====================================================================
+ STAGE 2 - WORLD: TILE, MAZE, LEVEL LOADER
+=====================================================================
+Goal: load an ASCII file into a queryable grid. No drawing yet.
+
+Files to write:
+  assets/levels/level1.txt              (28x31 ASCII maze)
+  include/world/Tile.h      src/world/Tile.cpp
+  include/world/Maze.h      src/world/Maze.cpp
+  include/world/LevelLoader.h  src/world/LevelLoader.cpp
+  tests/test_maze.cpp       (extend)
+  tests/test_level_loader.cpp
+
+Requirements:
+  Tile
+   - Holds a TileType; methods isWall(), isWalkable(), hasPellet(),
+     hasPowerPellet(), clearPellet()
+  Maze
+   - Stores the grid (std::vector<Tile> or vector<vector<Tile>>)
+   - width(), height(), at(Vec2i) const, bounds check inRange(Vec2i)
+   - isWalkable(Vec2i tile, bool isGhost) const
+       (ghost door is walkable for ghosts only when they are Eaten or
+        InHouse; Pac-Man never)
+   - wrap(Vec2i) : horizontal tunnel wrap (x = -1 -> width-1 and back)
+   - eatPelletAt(Vec2i) returns what was eaten (None, Pellet, Power)
+   - pelletsRemaining() const; isCleared() const
+   - Stores spawn points: pacmanSpawn(), ghostSpawn(name)
+   - reset() restores all pellets (for a new level / new game)
+  LevelLoader
+   - static Maze load(const std::string& path)
+   - Throws std::runtime_error (or returns std::optional / an error)
+     for: missing file, wrong row length, wrong row count, unknown
+     character, missing Pac-Man spawn, more than one Pac-Man spawn
+   - Character legend must match the README "Level Format" table
+
+OOP properties practiced:
+   - Encapsulation: the grid is private; only query methods are public
+   - Single Responsibility: LevelLoader parses, Maze models, Tile stores
+   - Const-correctness on all queries
+   - Exceptions for invalid input (error handling)
+   - Static factory method
+
+Tests:
+   test_maze.cpp
+    - Dimensions are 28 x 31 after loading level1.txt
+    - Border tiles are walls
+    - Pac-Man spawn is walkable
+    - Wall is not walkable; empty and pellet tiles are walkable
+    - Ghost door blocks Pac-Man but not an Eaten ghost
+    - wrap(): leaving the left edge on the tunnel row comes out right
+    - eatPelletAt: first call returns Pellet, second call returns None
+    - pelletsRemaining() decreases by one per eaten pellet
+    - isCleared() becomes true when the last pellet is eaten
+    - level1.txt has exactly 244 pellets in total
+   test_level_loader.cpp
+    - Loading a missing file throws
+    - Row too short / too long throws
+    - Unknown character throws
+    - No spawn point throws
+    (Write small temporary level files, or load from std::istringstream
+     if you add an overload that takes a stream - recommended.)
+
+DONE WHEN:
+  [ ] All maze and loader tests pass
+  [ ] You can load the real level1.txt without errors
+
+
+=====================================================================
+ STAGE 3 - ENTITY BASE CLASS AND PAC-MAN LOGIC
+=====================================================================
+Goal: Pac-Man moves correctly through the maze (logic only).
+
+Files to write:
+  include/entities/Entity.h   src/entities/Entity.cpp
+  include/entities/Pacman.h   src/entities/Pacman.cpp
+  tests/test_pacman.cpp
+
+Requirements:
+  Entity (abstract-ish base)
+   - Protected members: Vec2f position (pixel-space logical position),
+     Direction direction, float speed
+   - Public: position(), tile() (position -> Vec2i), direction(),
+     setDirection(), speed(), setSpeed()
+   - virtual void update(float dt, const Maze& maze) = 0;
+   - virtual destructor
+   - Helper: isAtTileCenter() const (within a small epsilon)
+  Pacman : public Entity
+   - Methods: requestDirection(Direction)   (stores the "wanted" turn)
+   - update(): moves along current direction by speed*dt; when at a
+     tile center:
+       1) if the buffered direction is walkable -> take it
+       2) else if the current direction is blocked -> stop
+   - Turn buffering: a turn requested slightly BEFORE the junction
+     must still work when the tile center is reached
+   - Instant reverse is allowed anywhere (Pac-Man can always reverse)
+   - Tunnel: leaving one side of the tunnel row appears on the other
+   - Movement never skips over a tile center (clamp with large dt)
+   - reset(spawn) puts Pac-Man back at spawn with Direction::Left
+
+OOP properties practiced:
+   - Inheritance (Entity -> Pacman)
+   - Abstraction (pure virtual update)
+   - Polymorphism (virtual update, virtual destructor)
+   - Encapsulation (protected state, public accessors)
+   - Liskov substitution: anything that works on Entity& works on Pacman
+
+Tests (test_pacman.cpp) - use a tiny hand-made Maze:
+   - Moves right by speed*dt in an open corridor
+   - Stops when the next tile is a wall
+   - Does not enter a wall when a turn into a wall is requested
+   - Buffered turn happens at the next junction
+   - Reverse direction works immediately
+   - Wraps through the tunnel
+   - Large dt does not teleport through a wall
+   - reset() restores spawn position and direction
+
+DONE WHEN:
+  [ ] All Pacman tests pass
+  [ ] Behavior is deterministic (same inputs -> same output every run)
+
+
+=====================================================================
+ STAGE 4 - TIMER, RENDERER WITH SHAPES, MAIN LOOP
+=====================================================================
+Goal: SEE the maze and move Pac-Man with the keyboard. Placeholders
+only (rectangles and circles), no sprites yet.
+
+Files to write:
+  include/core/Timer.h        src/core/Timer.cpp
+  include/core/Game.h         src/core/Game.cpp
+  include/graphics/Renderer.h src/graphics/Renderer.cpp
+  src/main.cpp                (becomes tiny: create Game, call run())
+
+Requirements:
+  Timer
+   - Fixed timestep accumulator: update logic at 60 Hz, render as fast
+     as allowed. tick() returns elapsed seconds; consumeStep() returns
+     true while a logic step is pending. Clamp huge frame times
+     (e.g. max 0.25 s) to avoid the "spiral of death".
+  Game
+   - Owns sf::RenderWindow, Renderer, Timer, Maze, Pacman
+   - run(): while(window.isOpen()) { handleInput; fixed update loop;
+     render; }
+   - handleInput maps arrow keys / WASD to Pacman::requestDirection
+  Renderer
+   - render(const Maze&, const Pacman&) draws: walls (blue rectangles),
+     pellets (small circles), power pellets (bigger circles), Pac-Man
+     (yellow circle). Scale factor so the window is big enough.
+   - Renderer only READS game objects (takes const references)
+
+OOP properties practiced:
+   - Composition (Game owns its parts)
+   - RAII (window, resources released automatically)
+   - Separation of concerns (Renderer never changes game state)
+   - Dependency direction: graphics depends on world/entities, never
+     the reverse
+
+Tests: none (needs a window). Test MANUALLY by running:
+
+        cmake --build build && ./build/pacman
+
+   Checklist: maze is drawn correctly; Pac-Man turns smoothly; walls
+   stop him; tunnel wrap works; window closes cleanly.
+   Timer's pure logic part can get a small test_timer.cpp if you
+   keep the clock out of the accumulator class.
+
+DONE WHEN:
+  [ ] You can drive Pac-Man around the whole maze
+  [ ] Movement speed is identical on 60 Hz and when you cap at 30 FPS
+
+
+=====================================================================
+ STAGE 5 - PELLETS AND SCORE MANAGER
+=====================================================================
+Goal: eating works, score and lives are tracked.
+
+Files to write:
+  include/systems/ScoreManager.h  src/systems/ScoreManager.cpp
+  tests/test_score_manager.cpp
+  (edit Game.cpp / Pacman or a PlayState-like update to call it)
+
+Requirements:
+  ScoreManager
+   - score(), highScore(), lives(), level()
+   - addPellet(), addPowerPellet()
+   - addGhostEaten(): 200, 400, 800, 1600 then resets with each new
+     power pellet (resetGhostCombo())
+   - addFruit(int points)
+   - loseLife(); isGameOver() when lives == 0
+   - Extra life exactly once at 10000 points
+   - Never lets highScore fall below score
+   - reset() for a new game (keeps highScore)
+   - loadHighScore(path) / saveHighScore(path) (use a data/ file, not
+     assets/); missing or corrupt file means high score 0, no crash
+  Game loop
+   - After Pac-Man moves, ask the Maze to eat a pellet at his tile and
+     tell ScoreManager what was eaten
+
+OOP properties practiced:
+   - Encapsulation of invariants (lives >= 0, highScore >= score)
+   - Single Responsibility
+   - Defensive programming (bad file)
+
+Tests (test_score_manager.cpp):
+   - Pellet adds 10, power pellet adds 50
+   - Ghost combo: 200, 400, 800, 1600, then combo reset
+   - Extra life at 10000 awarded once only
+   - Losing 3 lives -> game over
+   - High score updates; reset() keeps it
+   - Missing or corrupt high-score file returns 0
+
+DONE WHEN:
+  [ ] Score changes live while you play (print to console for now)
+  [ ] All score tests pass
+
+
+=====================================================================
+ STAGE 6 - GHOSTS: BASE CLASS, MODES, FOUR PERSONALITIES
+=====================================================================
+Goal: four ghosts that move and choose targets like the original.
+
+Files to write:
+  include/entities/Ghost.h    src/entities/Ghost.cpp
+  include/entities/Blinky.h   src/entities/Blinky.cpp
+  include/entities/Pinky.h    src/entities/Pinky.cpp
+  include/entities/Inky.h     src/entities/Inky.cpp
+  include/entities/Clyde.h    src/entities/Clyde.cpp
+  include/systems/GhostAI.h   src/systems/GhostAI.cpp
+  tests/test_ghost_ai.cpp
+
+Requirements:
+  Ghost : public Entity   (shared logic lives HERE only)
+   - Members: GhostMode mode, Vec2i scatterCorner, Vec2i startTile
+   - protected pure virtual: Vec2i chaseTarget(const GhostContext&) const
+       where GhostContext is a small struct: Pacman tile, Pacman
+       direction, Blinky tile (needed by Inky), maze reference
+   - Target selection by mode:
+       Scatter  -> scatterCorner
+       Chase    -> chaseTarget(ctx)
+       Frightened -> random valid direction at each junction
+       Eaten    -> the ghost-house tile
+   - Movement rule at every tile center:
+       * look at the next tile in the current direction, collect the
+         legal neighbor tiles (not walls)
+       * a ghost may NOT reverse by itself
+       * choose the neighbor whose center is closest (straight-line)
+         to the target
+       * ties are broken in the order Up, Left, Down, Right
+   - On a mode switch (Scatter <-> Chase, or to Frightened) the ghost
+     reverses direction once
+   - Speed depends on mode (normal, frightened, eaten, tunnel)
+   - setMode(), mode(), reset(), isFrightened(), isEaten()
+  Blinky   chase target = Pac-Man's tile
+  Pinky    chase target = 4 tiles ahead of Pac-Man
+           (optional: reproduce the original bug when Pac-Man faces
+            up: target is 4 up AND 4 left)
+  Inky     chase target = take the tile 2 ahead of Pac-Man, draw a
+           vector from Blinky to it, double that vector
+  Clyde    chase target = Pac-Man's tile when farther than 8 tiles,
+           otherwise his own scatter corner
+  Scatter corners: Blinky top-right, Pinky top-left,
+                   Inky bottom-right, Clyde bottom-left
+  GhostAI (system, not an entity)
+   - Owns the global mode timer: scatter/chase schedule from
+     Constants.h; update(dt) tells when to switch
+   - startFrightened(duration) pauses the schedule timer and sets
+     Frightened; when it ends, ghosts return to the schedule's mode
+   - Owns NO targeting math (that is in the ghost subclasses)
+
+OOP properties practiced:
+   - Inheritance with a shared base class (no duplicated logic)
+   - Polymorphism: std::vector<std::unique_ptr<Ghost>> and a single
+     loop calling ghost->update(...); only chaseTarget differs
+   - Abstract class (Ghost cannot be instantiated)
+   - Template Method pattern: Ghost::update() is the fixed algorithm;
+     chaseTarget() is the customization point
+   - Finite State Machine (GhostMode)
+   - Strategy-like separation: GhostAI decides WHEN, subclasses decide
+     WHERE
+
+Tests (test_ghost_ai.cpp), using small mazes and fixed contexts:
+   - Blinky targets Pac-Man's tile
+   - Pinky targets 4 tiles ahead in each of the four directions
+   - Inky: for a known Blinky and Pac-Man position, target equals the
+     hand-calculated doubled vector
+   - Clyde: far (>8 tiles) targets Pac-Man; near targets his corner
+   - Ghost never reverses on its own in a corridor
+   - Mode switch makes the ghost reverse exactly once
+   - Tie-break order Up, Left, Down, Right is respected
+   - Scatter/chase schedule: after 7 s -> Chase, after 27 s -> Scatter
+   - Frightened pauses the schedule timer and then resumes it
+   - Eaten ghost heads for the house and returns to normal mode there
+
+DONE WHEN:
+  [ ] All ghost tests pass
+  [ ] Ghosts visibly chase differently when drawn as colored circles
+  [ ] Adding a fifth ghost would require only one new small subclass
+
+
+=====================================================================
+ STAGE 7 - COLLISION, DEATH, AND EATING GHOSTS
+=====================================================================
+Goal: Pac-Man and ghosts interact.
+
+Files to write:
+  include/systems/Collision.h   src/systems/Collision.cpp
+  tests/test_collision.cpp
+  (edit Game.cpp to use it)
+
+Requirements:
+  Collision
+   - Pure functions or a stateless class:
+       bool sameTile(const Entity&, const Entity&)
+       or distance-based overlap using a radius from Constants.h
+   - Does NOT know about scoring or lives (it only answers "touching?")
+  Game logic reacts to the answer:
+   - Touching a Frightened ghost: ghost becomes Eaten, add combo score
+   - Touching a Scatter/Chase ghost: Pac-Man dies, lose a life, reset
+     all positions (keep pellets), brief pause
+   - Touching an Eaten ghost: nothing happens
+   - Eating a power pellet: GhostAI::startFrightened and reset combo
+   - Game over when lives reach 0
+
+OOP properties practiced:
+   - Single Responsibility (detection is separate from reaction)
+   - Loose coupling (Collision takes Entity&, not concrete classes)
+   - Polymorphism through the Entity interface
+
+Tests (test_collision.cpp):
+   - Same tile -> colliding; neighbor tile -> not colliding
+   - Moving entities that cross paths between frames still collide
+     (decide and test your rule for tunneling through each other)
+   - Symmetry: collides(a, b) == collides(b, a)
+   - Eaten or frightened status does not affect pure detection
+
+DONE WHEN:
+  [ ] You can die, lose lives, eat ghosts, and see the combo scores
+  [ ] All collision tests pass
+
+
+=====================================================================
+ STAGE 8 - GAME STATES AND HUD
+=====================================================================
+Goal: real game flow: Menu -> Play -> Pause -> Game Over -> Menu.
+
+Files to write:
+  include/states/GameState.h    src/states/GameState.cpp
+  include/states/MenuState.h    src/states/MenuState.cpp
+  include/states/PlayState.h    src/states/PlayState.cpp
+  include/states/PauseState.h   src/states/PauseState.cpp
+  include/states/GameOverState.h src/states/GameOverState.cpp
+  include/ui/HUD.h              src/ui/HUD.cpp
+  assets/fonts/arcade.ttf       (add any free font)
+
+Requirements:
+  GameState (abstract interface)
+   - virtual void handleInput(const sf::Event&) = 0;
+   - virtual void update(float dt) = 0;
+   - virtual void render(sf::RenderTarget&) = 0;
+   - virtual ~GameState() = default;
+  Game
+   - Holds the current state through std::unique_ptr<GameState> (or a
+     stack, so Pause can sit on top of Play and then pop)
+   - States request changes through a small interface
+     (e.g. game.changeState(...), game.pushState(...), popState()),
+     applied safely at the end of the frame
+  PlayState   - the gameplay from stages 3-7 moves here
+  PauseState  - freezes updates, shows "PAUSED", P resumes
+  MenuState   - title, "Press Enter", high score
+  GameOverState - shows final score, Enter returns to the menu
+  HUD         - score, high score, lives, level; reads from
+                ScoreManager (const reference only)
+
+OOP properties practiced:
+   - State pattern (the main loop only knows GameState)
+   - Polymorphism and abstraction (interface class)
+   - Open/Closed principle (a new screen needs no change to the loop)
+   - Stack-based state management
+
+Tests: manual (windowed). Checklist:
+   - Every transition works in both directions with no crash
+   - Pausing then resuming does not change ghost timers
+   - Starting a new game resets score and lives but keeps high score
+
+DONE WHEN:
+  [ ] Full flow menu -> play -> pause -> game over -> menu works
+  [ ] No game logic code remains in main.cpp or Game.cpp except wiring
+
+
+=====================================================================
+ STAGE 9 - LEVEL PROGRESSION AND FRUIT
+=====================================================================
+Goal: multiple levels with rising difficulty, bonus fruit.
+
+Files to write:
+  include/systems/LevelManager.h  src/systems/LevelManager.cpp
+  include/entities/Fruit.h        src/entities/Fruit.cpp
+  tests/test_level_manager.cpp    (NEW: remember rule A2)
+
+Requirements:
+  LevelManager
+   - Difficulty table (data, not if/else chains) per level: Pac-Man
+     speed, ghost speed, frightened speed, frightened duration (down to
+     0 on later levels), scatter/chase schedule
+   - currentLevel(), advance(), reset()
+   - paramsFor(level) returns a const struct; clamps for high levels
+  Fruit : public Entity (or a simple object)
+   - Appears below the ghost house after 70 and after 170 pellets are
+     eaten, stays about 9-10 seconds, then disappears
+   - Type and points depend on the level (cherry 100, strawberry 300,
+     orange 500, apple 700, melon 1000, ... as in your docs table)
+   - isActive(), points(), update(dt)
+  Level complete
+   - maze.isCleared() -> short pause -> maze.reset() -> advance level
+
+OOP properties practiced:
+   - Data-driven design (table instead of branching)
+   - Immutable value object for level parameters
+   - Reuse of Entity through inheritance
+   - Encapsulation of time-limited behavior
+
+Tests:
+   - Level 1 parameters match your design_notes.md values
+   - Level numbers above the table length reuse the last row
+   - Frightened duration decreases or stays the same as level rises
+   - Fruit appears at exactly 70 and 170 pellets eaten, not before
+   - Fruit disappears after its time limit
+   - Fruit points match the level
+
+DONE WHEN:
+  [ ] Clearing the maze starts a harder level
+  [ ] All LevelManager and fruit tests pass
+
+
+=====================================================================
+ STAGE 10 - SPRITES AND ANIMATION
+=====================================================================
+Goal: replace shapes with real art. The logic does not change.
+
+Files to write:
+  assets/sprites/spritesheet.png   (16x16 frames, free or custom)
+  include/graphics/SpriteSheet.h   src/graphics/SpriteSheet.cpp
+  include/graphics/Animation.h     src/graphics/Animation.cpp
+  (edit Renderer to use them)
+
+Requirements:
+  SpriteSheet
+   - load(path) throws or reports when the file is missing
+   - frame(row, column) returns the sf::IntRect for that cell
+  Animation
+   - Holds a list of frames and a frame duration; update(dt),
+     currentFrame(), reset(), setLooping()
+   - Pac-Man: mouth open/close, rotated by direction; death animation
+   - Ghosts: two-frame walk, eyes by direction, blue frightened,
+     white/blue flashing near the end of frightened mode, eyes-only for
+     Eaten
+  Renderer
+   - If the sprite sheet fails to load, fall back to the shapes from
+     stage 4 so the game still runs
+
+OOP properties practiced:
+   - Composition (Renderer has SpriteSheet and Animations)
+   - Resource management with RAII
+   - Fallback strategy / graceful failure
+
+Tests: manual. Optional small tests for Animation::update with a
+   fixed dt (frame index after N seconds) if Animation has no SFML
+   types in its timing logic.
+
+DONE WHEN:
+  [ ] The game looks like Pac-Man and plays exactly as before
+  [ ] Renaming spritesheet.png makes the game fall back to shapes, not crash
+
+
+=====================================================================
+ STAGE 11 - AUDIO
+=====================================================================
+Goal: sound effects wired to events.
+
+Files to write:
+  include/audio/AudioManager.h  src/audio/AudioManager.cpp
+  assets/sounds/*.wav           (waka, death, eat_ghost, intro, siren)
+
+Requirements:
+  AudioManager
+   - Loads every sound once (sf::SoundBuffer) and plays through
+     sf::Sound objects it owns
+   - play(SoundId), stop(SoundId), setLooping, setMuted(bool),
+     setVolume(float)
+   - enum class SoundId { Waka, Death, EatGhost, Intro, Siren }
+   - Missing file: log a warning, keep running silently
+  Events
+   - Intro on game start, waka while eating pellets, siren loops
+     during play, death on losing a life, eat_ghost on eating a ghost
+   - M key toggles mute
+
+OOP properties practiced:
+   - Encapsulation of a resource-heavy subsystem
+   - Enum-based interface instead of string names
+   - Facade pattern (game code calls play(SoundId), nothing else)
+   - Optional: Observer pattern (game events -> audio listener)
+
+Tests: manual; fix silence/overlap issues by listening.
+
+DONE WHEN:
+  [ ] Every event has its sound; mute works; missing sound files do
+      not crash the game
+
+
+=====================================================================
+ STAGE 12 - POLISH, DOCUMENTATION, RELEASE 1.0
+=====================================================================
+Goal: finish, document, and ship.
+
+Tasks:
+  - Persist the high score to data/highscore.txt
+  - Fill docs/design_notes.md: ghost rules, speed table, score table,
+    timing table, level table (these should match Constants.h)
+  - Update README: finished roadmap checkboxes, screenshots, controls
+  - Run with warnings as errors for one session:
+      add -Werror to the compile options temporarily and fix
+      everything
+  - Run sanitizers once (Debug build):
+
+        cmake -B build-asan -S . -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+          -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+        cmake --build build-asan
+        ctest --test-dir build-asan --output-on-failure
+
+  - Review: any logic in graphics/states that should be in systems?
+    Any copy-pasted code between ghosts? Any magic numbers?
+  - Choose a license; check credits for every asset
+  - Tag the release:
+
+        git tag -a v1.0 -m "Release 1.0"
+
+DONE WHEN:
+  [ ] Clean build, all tests pass, sanitizers report nothing
+  [ ] A friend can clone the repo and follow the README to play
+
+
+---------------------------------------------------------------------
+ PART D - OOP CHECKLIST (where each concept appears)
+---------------------------------------------------------------------
+
+ Encapsulation ...... Maze grid, ScoreManager invariants (stages 2, 5)
+ Abstraction ........ Entity, Ghost, GameState (stages 3, 6, 8)
+ Inheritance ........ Entity -> Pacman/Ghost -> four ghosts (3, 6)
+ Polymorphism ....... virtual update(), vector of unique_ptr<Ghost>,
+                      state stack (3, 6, 8)
+ Composition ........ Game owns Maze, Pacman, Renderer, ScoreManager (4)
+ RAII ............... window, textures, sounds, unique_ptr (4, 10, 11)
+ Design patterns .... State (8), Template Method (6), Factory method
+                      (2), Facade (11), data-driven table (9)
+ SOLID .............. SRP: Collision/ScoreManager/GhostAI (5, 6, 7)
+                      OCP: new GameState or new ghost without edits
+                      LSP: Entity& works for any subclass
+                      DIP: logic never depends on SFML (rule R1)
+ Error handling ..... exceptions in LevelLoader, fallbacks in 10 and 11
+ Testing ............ every logic class has a test file (stages 1-9)
+
+=====================================================================
+ END OF ROADMAP
+=====================================================================
